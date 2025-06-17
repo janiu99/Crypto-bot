@@ -4,20 +4,22 @@ from datetime import datetime
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
+# Dane logowania z Railway (zmienne środowiskowe)
 api_key = os.getenv("BINANCE_API_KEY")
 api_secret = os.getenv("BINANCE_API_SECRET")
 
 client = Client(api_key, api_secret)
 
+# Parametry zdefiniowane w Railway
 PAIRS = os.getenv("PAIRS", "BTCUSDC,ETHUSDC,BNBUSDC").split(",")
-CAPITAL_SPLIT = int(os.getenv("CAPITAL_SPLIT", 3))
-TRADE_INTERVAL = int(os.getenv("TRADE_INTERVAL_SEC", 900))
+CAPITAL_SPLIT = int(os.getenv("CAPITAL_SPLIT", 3))  # ile par = na ile części dzielimy saldo
+TRADE_INTERVAL = int(os.getenv("TRADE_INTERVAL_SEC", 900))  # np. 900 sekund = 15 minut
 
-positions = {}
+positions = {}  # przechowuje ceny zakupu dla każdej pary
 
 def is_trading_hour():
-    now = datetime.now(timezone.utc) + timedelta(hours=2)
-    return 14 <= now.hour < 22
+    now = datetime.now()
+    return 14 <= now.hour < 22  # bot działa tylko od 14:00 do 21:59 (CEST)
 
 def get_price(pair):
     klines = client.get_klines(symbol=pair, interval=Client.KLINE_INTERVAL_15MINUTE, limit=2)
@@ -36,6 +38,7 @@ def trade(pair, usdc_balance):
             profit = (close_price - entry_price) / entry_price * 100
 
             if profit >= 1:
+                # Take profit
                 symbol = pair.replace("USDC", "")
                 quantity = float(client.get_asset_balance(asset=symbol)["free"])
                 if quantity > 0:
@@ -44,6 +47,7 @@ def trade(pair, usdc_balance):
                     del positions[pair]
 
             elif profit <= -2:
+                # Stop loss
                 symbol = pair.replace("USDC", "")
                 quantity = float(client.get_asset_balance(asset=symbol)["free"])
                 if quantity > 0:
@@ -53,6 +57,7 @@ def trade(pair, usdc_balance):
 
         else:
             if change <= -1:
+                # Kupuj po spadku
                 usdc_part = usdc_balance / CAPITAL_SPLIT
                 qty = round(usdc_part / close_price, 5)
                 client.order_market_buy(symbol=pair, quantity=qty)
