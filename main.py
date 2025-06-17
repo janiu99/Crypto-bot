@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
@@ -18,7 +18,7 @@ TRADE_INTERVAL = int(os.getenv("TRADE_INTERVAL_SEC", 900))  # np. 900 sekund = 1
 positions = {}  # przechowuje ceny zakupu dla każdej pary
 
 def is_trading_hour():
-    now = datetime.now()
+    now = datetime.now(timezone.utc) + timedelta(hours=2)  # czas polski
     return 14 <= now.hour < 22  # bot działa tylko od 14:00 do 21:59 (CEST)
 
 def get_price(pair):
