@@ -16,7 +16,7 @@ TRADE_INTERVAL = int(os.getenv("TRADE_INTERVAL_SEC", 900))
 positions = {}
 
 def is_trading_hour():
-    now = datetime.now()
+    now = datetime.now(timezone.utc) + timedelta(hours=2)
     return 14 <= now.hour < 22
 
 def get_price(pair):
