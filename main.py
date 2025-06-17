@@ -1,26 +1,22 @@
 import os
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
-# Dane logowania z Railway (zmienne środowiskowe)
+# Dane API z Railway
 api_key = os.getenv("BINANCE_API_KEY")
 api_secret = os.getenv("BINANCE_API_SECRET")
 
 client = Client(api_key, api_secret)
 
-# Parametry zdefiniowane w Railway
+# Parametry
 PAIRS = os.getenv("PAIRS", "BTCUSDC,ETHUSDC,BNBUSDC").split(",")
-CAPITAL_SPLIT = int(os.getenv("CAPITAL_SPLIT", 3))  # ile par = na ile części dzielimy saldo
-TRADE_INTERVAL = int(os.getenv("TRADE_INTERVAL_SEC", 900))  # np. 900 sekund = 15 minut
+CAPITAL_SPLIT = int(os.getenv("CAPITAL_SPLIT", 3))  # Na ile par dzielimy saldo
+TRADE_INTERVAL = int(os.getenv("TRADE_INTERVAL_SEC", 900))  # np. 900 = 15 min
 
-positions = {}  # przechowuje ceny zakupu dla każdej pary
+positions = {}  # Przechowuje ceny zakupu
 
-def is_trading_hour():
-    now = datetime.now(timezone.utc) + timedelta(hours=2)  # czas PL (UTC+2)
-    return 10 <= now.hour < 22
-    
 def get_price(pair):
     klines = client.get_klines(symbol=pair, interval=Client.KLINE_INTERVAL_15MINUTE, limit=2)
     open_price = float(klines[0][1])
@@ -37,8 +33,7 @@ def trade(pair, usdc_balance):
             entry_price = positions[pair]
             profit = (close_price - entry_price) / entry_price * 100
 
-            if profit >= 1:
-                # Take profit
+            if profit >= 0.75:
                 symbol = pair.replace("USDC", "")
                 quantity = float(client.get_asset_balance(asset=symbol)["free"])
                 if quantity > 0:
@@ -47,7 +42,6 @@ def trade(pair, usdc_balance):
                     del positions[pair]
 
             elif profit <= -2:
-                # Stop loss
                 symbol = pair.replace("USDC", "")
                 quantity = float(client.get_asset_balance(asset=symbol)["free"])
                 if quantity > 0:
@@ -56,8 +50,7 @@ def trade(pair, usdc_balance):
                     del positions[pair]
 
         else:
-            if change <= -1:
-                # Kupuj po spadku
+            if change <= -0.5:
                 usdc_part = usdc_balance / CAPITAL_SPLIT
                 qty = round(usdc_part / close_price, 5)
                 client.order_market_buy(symbol=pair, quantity=qty)
@@ -71,14 +64,11 @@ def trade(pair, usdc_balance):
 
 while True:
     try:
-        if is_trading_hour():
-            usdc_balance = float(client.get_asset_balance(asset='USDC')["free"])
-            print(f"Saldo USDC: {usdc_balance:.2f}")
-            for pair in PAIRS:
-                trade(pair, usdc_balance)
-        else:
-            print("⏸️ Poza godzinami handlu – bot śpi 😴")
-        print("⏳ Oczekiwanie...")
+        usdc_balance = float(client.get_asset_balance(asset='USDC')["free"])
+        print(f"\n🟢 Saldo USDC: {usdc_balance:.2f} – {datetime.now().strftime('%H:%M:%S')}")
+        for pair in PAIRS:
+            trade(pair, usdc_balance)
+        print("⏳ Oczekiwanie...\n")
         time.sleep(TRADE_INTERVAL)
 
     except KeyboardInterrupt:
