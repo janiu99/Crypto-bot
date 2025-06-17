@@ -17,6 +17,10 @@ TRADE_INTERVAL = int(os.getenv("TRADE_INTERVAL_SEC", 900))  # np. 900 sekund = 1
 
 positions = {}  # przechowuje ceny zakupu dla każdej pary
 
+def is_trading_hour():
+    now = datetime.now(timezone.utc) + timedelta(hours=2)  # czas PL (UTC+2)
+    return 10 <= now.hour < 22
+    
 def get_price(pair):
     klines = client.get_klines(symbol=pair, interval=Client.KLINE_INTERVAL_15MINUTE, limit=2)
     open_price = float(klines[0][1])
