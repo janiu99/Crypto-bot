@@ -75,7 +75,7 @@ def trade(pair, usdc_balance):
             if change <= -0.5:
                 # Kupno po spadku
                 usdc_part = usdc_balance / CAPITAL_SPLIT
-                qty = round(usdc_part / close_price, 5)
+                qty = round(usdc_part / close_price, 3)  # dla BNB minimalna ilość to zazwyczaj 0.001 z dokładnością do 3 miejsc
                 client.order_market_buy(symbol=pair, quantity=qty)
                 positions[pair] = close_price
                 print(f"[{pair}] 🟢 Kupno po spadku: {close_price:.2f}")
