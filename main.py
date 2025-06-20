@@ -1,25 +1,36 @@
 import os
 import time
 import math
-from datetime import datetime, timezone, timedelta
+import json
+from datetime import datetime
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
-# Dane z Railway (zmienne środowiskowe)
+# Dane z Railway
 api_key = os.getenv("BINANCE_API_KEY")
 api_secret = os.getenv("BINANCE_API_SECRET")
 
 client = Client(api_key, api_secret)
 
-# Ustawienia bota
+# Konfiguracja
 PAIRS = os.getenv("PAIRS", "BTCUSDC,ETHUSDC,BNBUSDC").split(",")
 CAPITAL_SPLIT = int(os.getenv("CAPITAL_SPLIT", 3))
-TRADE_INTERVAL = int(os.getenv("TRADE_INTERVAL_SEC", 900))  # domyślnie 15 minut
+TRADE_INTERVAL = int(os.getenv("TRADE_INTERVAL_SEC", 900))  # 15 minut
 
-positions = {}         # aktywne pozycje (cena zakupu)
-stop_loss_count = {}   # liczniki stop-lossów
-blocked_pairs = {}     # zablokowane pary (czas ostatniego stop-loss)
-BLOCK_DURATION = 12 * 60 * 60  # 12 godzin
+positions_file = "positions.json"
+positions = {}
+stop_loss_count = {}
+blocked_pairs = {}
+BLOCK_DURATION = 12 * 60 * 60  # 12h
+
+# Ładowanie pozycji z pliku
+if os.path.exists(positions_file):
+    with open(positions_file, "r") as f:
+        positions = json.load(f)
+
+def save_positions():
+    with open(positions_file, "w") as f:
+        json.dump(positions, f)
 
 def get_price(pair):
     klines = client.get_klines(symbol=pair, interval=Client.KLINE_INTERVAL_15MINUTE, limit=2)
@@ -27,14 +38,13 @@ def get_price(pair):
     close_price = float(klines[-1][4])
     return open_price, close_price
 
-def get_lot_size(symbol):
-    info = client.get_symbol_info(symbol)
+def get_lot_size(pair):
+    info = client.get_symbol_info(pair)
     for f in info['filters']:
         if f['filterType'] == 'LOT_SIZE':
-            step_size = float(f['stepSize'])
+            step = float(f['stepSize'])
             min_qty = float(f['minQty'])
-            return step_size, min_qty
-    # fallback, jeśli nie znaleziono filtra
+            return step, min_qty
     return 0.001, 0.0001
 
 def round_step_size(quantity, step_size):
@@ -44,83 +54,80 @@ def round_step_size(quantity, step_size):
 def trade(pair, usdc_balance):
     try:
         now = time.time()
+        symbol = pair.replace("USDC", "")
 
-        # Sprawdzenie zablokowanych par
-        if pair in blocked_pairs:
-            if now - blocked_pairs[pair] < BLOCK_DURATION:
-                print(f"[{pair}] Zablokowane (3× stop-loss) ❌")
-                return
-            else:
-                del blocked_pairs[pair]
-                stop_loss_count[pair] = 0
+        # Zablokowanie po 3x stop-loss
+        if pair in blocked_pairs and now - blocked_pairs[pair] < BLOCK_DURATION:
+            print(f"[{pair}] ❌ Zablokowana para (stop-loss 3x)")
+            return
+        elif pair in blocked_pairs:
+            del blocked_pairs[pair]
+            stop_loss_count[pair] = 0
 
         open_price, close_price = get_price(pair)
         change = (close_price - open_price) / open_price * 100
         print(f"[{pair}] Zmiana ceny: {change:.2f}%")
 
+        balance = float(client.get_asset_balance(asset=symbol)["free"])
+        step, min_qty = get_lot_size(pair)
+
         if pair in positions:
             entry_price = positions[pair]
             profit = (close_price - entry_price) / entry_price * 100
 
-            if profit >= 0.9:
-                # Take profit
-                symbol = pair.replace("USDC", "")
-                quantity = float(client.get_asset_balance(asset=symbol)["free"])
-                if quantity > 0:
-                    step, _ = get_lot_size(pair)
-                    quantity = round_step_size(quantity, step)
-                    client.order_market_sell(symbol=pair, quantity=quantity)
-                    print(f"[{pair}] ✅ Sprzedaż z zyskiem {profit:.2f}%")
+            if profit >= 0.9 or profit <= -1.5:
+                if balance >= min_qty:
+                    qty = round_step_size(balance, step)
+                    client.order_market_sell(symbol=pair, quantity=qty)
+                    print(f"[{pair}] {'✅ Zysk' if profit >= 0.9 else '🛑 STOP-LOSS'}: {profit:.2f}%")
                     del positions[pair]
+                    save_positions()
 
-            elif profit <= -1.5:
-                # Stop loss
-                symbol = pair.replace("USDC", "")
-                quantity = float(client.get_asset_balance(asset=symbol)["free"])
-                if quantity > 0:
-                    step, _ = get_lot_size(pair)
-                    quantity = round_step_size(quantity, step)
-                    client.order_market_sell(symbol=pair, quantity=quantity)
-                    print(f"[{pair}] 🛑 STOP-LOSS {profit:.2f}%")
-                    del positions[pair]
+                    if profit <= -1.5:
+                        stop_loss_count[pair] = stop_loss_count.get(pair, 0) + 1
+                        if stop_loss_count[pair] >= 3:
+                            blocked_pairs[pair] = time.time()
+                            print(f"[{pair}] ⚠️ Zablokowane po 3 stratach")
 
-                    stop_loss_count[pair] = stop_loss_count.get(pair, 0) + 1
-                    if stop_loss_count[pair] >= 3:
-                        blocked_pairs[pair] = time.time()
-                        print(f"[{pair}] ⚠️ Zablokowane po 3× stratnych transakcjach na 12h")
+                else:
+                    print(f"[{pair}] ⚠️ Za małe saldo {symbol} do sprzedaży: {balance}")
 
         else:
-            # Kupno tylko jeśli nie ma otwartej pozycji na tę parę
+            if balance >= min_qty:
+                print(f"[{pair}] ⛔ Już masz {symbol} ({balance}), pomijam zakup.")
+                return
+
             if change <= -0.5:
                 usdc_part = usdc_balance / CAPITAL_SPLIT
-                step, min_qty = get_lot_size(pair)
-                qty = usdc_part / close_price
-                qty = round_step_size(qty, step)
+                qty = round_step_size(usdc_part / close_price, step)
+
                 if qty >= min_qty:
                     client.order_market_buy(symbol=pair, quantity=qty)
                     positions[pair] = close_price
-                    print(f"[{pair}] 🟢 Kupno po spadku: {close_price:.2f}")
+                    save_positions()
+                    print(f"[{pair}] 🟢 Kupno {qty} po {close_price:.2f}")
                 else:
-                    print(f"[{pair}] ❗ Ilość {qty} poniżej minQty {min_qty}")
+                    print(f"[{pair}] ❗ Ilość {qty} < minQty {min_qty}, pomijam zakup.")
 
     except BinanceAPIException as e:
         print(f"Błąd Binance ({pair}): {e}")
     except Exception as e:
         print(f"Inny błąd ({pair}): {e}")
 
-# Główna pętla bota
+# Główna pętla
 while True:
     try:
         usdc_balance = float(client.get_asset_balance(asset='USDC')["free"])
-        print(f"\nSaldo USDC: {usdc_balance:.2f}")
+        print(f"\n💰 Saldo USDC: {usdc_balance:.2f}")
+
         for pair in PAIRS:
             trade(pair, usdc_balance)
 
-        print("⏳ Oczekiwanie...")
+        print("⏳ Czekam...")
         time.sleep(TRADE_INTERVAL)
 
     except KeyboardInterrupt:
-        print("⛔ Bot zatrzymany ręcznie.")
+        print("⛔ Zatrzymano bota.")
         break
     except Exception as e:
-        print(f"Błąd ogólny: {e}")
+        print(f"Błąd główny: {e}")
