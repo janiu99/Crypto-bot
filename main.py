@@ -23,6 +23,10 @@ stop_loss_count = {}
 blocked_pairs = {}
 BLOCK_DURATION = 12 * 60 * 60  # 12h
 
+# Stałe zysków i prowizji
+MIN_NET_PROFIT = 0.5  # minimum netto jakie chcesz osiągnąć (np. 0.5%)
+FEE_BUFFER = 0.2      # prowizja market buy + sell (0.1% + 0.1%)
+
 # Ładowanie pozycji z pliku
 if os.path.exists(positions_file):
     with open(positions_file, "r") as f:
@@ -51,12 +55,24 @@ def round_step_size(quantity, step_size):
     precision = int(round(-math.log(step_size, 10), 0))
     return round(quantity, precision)
 
+def get_dynamic_tp(pair, lookback=5, multiplier=2.0):
+    klines = client.get_klines(symbol=pair, interval=Client.KLINE_INTERVAL_15MINUTE, limit=lookback)
+    volatilities = []
+    for k in klines:
+        high = float(k[2])
+        low = float(k[3])
+        close = float(k[4])
+        volatility = (high - low) / close
+        volatilities.append(volatility)
+    avg_volatility = sum(volatilities) / len(volatilities)
+    dynamic_tp = avg_volatility * multiplier * 100  # w %
+    return round(dynamic_tp, 4)
+
 def trade(pair, usdc_balance):
     try:
         now = time.time()
         symbol = pair.replace("USDC", "")
 
-        # Zablokowanie po 3x stop-loss
         if pair in blocked_pairs and now - blocked_pairs[pair] < BLOCK_DURATION:
             print(f"[{pair}] ❌ Zablokowana para (stop-loss 3x)")
             return
@@ -74,12 +90,14 @@ def trade(pair, usdc_balance):
         if pair in positions:
             entry_price = positions[pair]
             profit = (close_price - entry_price) / entry_price * 100
+            dynamic_tp = get_dynamic_tp(pair)
+            adjusted_tp = max(dynamic_tp + FEE_BUFFER, MIN_NET_PROFIT + FEE_BUFFER)
 
-            if profit >= 0.9 or profit <= -1.5:
+            if profit >= adjusted_tp or profit <= -1.5:
                 if balance >= min_qty:
                     qty = round_step_size(balance, step)
                     client.order_market_sell(symbol=pair, quantity=qty)
-                    print(f"[{pair}] {'✅ Zysk' if profit >= 0.9 else '🛑 STOP-LOSS'}: {profit:.2f}%")
+                    print(f"[{pair}] {'✅ Zysk' if profit >= adjusted_tp else '🚩 STOP-LOSS'}: {profit:.2f}% (TP: {adjusted_tp:.2f}%)")
                     del positions[pair]
                     save_positions()
 
@@ -88,7 +106,6 @@ def trade(pair, usdc_balance):
                         if stop_loss_count[pair] >= 3:
                             blocked_pairs[pair] = time.time()
                             print(f"[{pair}] ⚠️ Zablokowane po 3 stratach")
-
                 else:
                     print(f"[{pair}] ⚠️ Za małe saldo {symbol} do sprzedaży: {balance}")
 
@@ -105,7 +122,7 @@ def trade(pair, usdc_balance):
                     client.order_market_buy(symbol=pair, quantity=qty)
                     positions[pair] = close_price
                     save_positions()
-                    print(f"[{pair}] 🟢 Kupno {qty} po {close_price:.2f}")
+                    print(f"[{pair}] \U0001f7e2 Kupno {qty} po {close_price:.2f}")
                 else:
                     print(f"[{pair}] ❗ Ilość {qty} < minQty {min_qty}, pomijam zakup.")
 
