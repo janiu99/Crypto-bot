@@ -1,3 +1,98 @@
+import os
+import time
+import math
+import json
+from datetime import datetime
+from binance.client import Client
+from binance.exceptions import BinanceAPIException
+
+# Dane z Railway
+api_key = os.getenv("BINANCE_API_KEY")
+api_secret = os.getenv("BINANCE_API_SECRET")
+
+client = Client(api_key, api_secret)
+
+# Konfiguracja
+PAIRS = os.getenv("PAIRS", "BTCUSDC,ETHUSDC,BNBUSDC").split(",")
+CAPITAL_SPLIT = int(os.getenv("CAPITAL_SPLIT", 3))
+TRADE_INTERVAL = int(os.getenv("TRADE_INTERVAL_SEC", 900))  # 15 minut
+
+positions_file = "positions.json"
+positions = {}
+stop_loss_count = {}
+blocked_pairs = {}
+BLOCK_DURATION = 12 * 60 * 60  # 12h
+
+# Stałe zysków i prowizji
+MIN_NET_PROFIT = 0.5  # minimum netto jakie chcesz osiągnąć (np. 0.5%)
+FEE_BUFFER = 0.2      # prowizja market buy + sell (0.1% + 0.1%)
+
+# Ładowanie pozycji z pliku
+if os.path.exists(positions_file):
+    with open(positions_file, "r") as f:
+        positions = json.load(f)
+
+def save_positions():
+    with open(positions_file, "w") as f:
+        json.dump(positions, f)
+
+def get_price(pair):
+    klines = client.get_klines(symbol=pair, interval=Client.KLINE_INTERVAL_15MINUTE, limit=2)
+    open_price = float(klines[0][1])
+    close_price = float(klines[-1][4])
+    return open_price, close_price
+
+def get_lot_size(pair):
+    info = client.get_symbol_info(pair)
+    for f in info['filters']:
+        if f['filterType'] == 'LOT_SIZE':
+            step = float(f['stepSize'])
+            min_qty = float(f['minQty'])
+            return step, min_qty
+    return 0.001, 0.0001
+
+def round_step_size(quantity, step_size):
+    precision = int(round(-math.log(step_size, 10), 0))
+    return round(quantity, precision)
+
+def get_dynamic_tp(pair, lookback=5, multiplier=2.0):
+    klines = client.get_klines(symbol=pair, interval=Client.KLINE_INTERVAL_15MINUTE, limit=lookback)
+    volatilities = []
+    for k in klines:
+        high = float(k[2])
+        low = float(k[3])
+        close = float(k[4])
+        volatility = (high - low) / close
+        volatilities.append(volatility)
+    avg_volatility = sum(volatilities) / len(volatilities)
+    dynamic_tp = avg_volatility * multiplier * 100  # w %
+    return round(dynamic_tp, 4)
+
+def trade(pair, usdc_balance):
+    try:
+        now = time.time()
+        symbol = pair.replace("USDC", "")
+
+        if pair in blocked_pairs and now - blocked_pairs[pair] < BLOCK_DURATION:
+            print(f"[{pair}] ❌ Zablokowana para (stop-loss 3x)")
+            return
+        elif pair in blocked_pairs:
+            del blocked_pairs[pair]
+            stop_loss_count[pair] = 0
+
+        open_price, close_price = get_price(pair)
+        change = (close_price - open_price) / open_price * 100
+        print(f"[{pair}] Zmiana ceny: {change:.2f}%")
+
+        balance = float(client.get_asset_balance(asset=symbol)["free"])
+        step, min_qty = get_lot_size(pair)
+
+        if pair in positions:
+            entry_price = positions[pair]
+            profit = (close_price - entry_price) / entry_price * 100
+            dynamic_tp = get_dynamic_tp(pair)
+            adjusted_tp = max(dynamic_tp + FEE_BUFFER, MIN_NET_PROFIT + FEE_BUFFER)
+
             if profit >= adjusted_tp or profit <= -1.5:
                 if balance >= min_qty:
                     qty = round_step_size(balance, step)
